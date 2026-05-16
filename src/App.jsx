@@ -1,58 +1,101 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 import ToDoForm from "./Add";
 import ToDo from "./apr";
 import axios from 'axios';
 
 const STORAGE_KEY = 'user_tasks_data';
-const WEATHER_API_KEY = 'c7616da4b68205c2f3ae73df2c31d177';
 
 function App() {
-  const [currencyData, setCurrencyData] = useState({});
-  const [weatherInfo, setWeatherInfo] = useState(null);
+  const [currencyData, setCurrencyData] = useState(null);
+  const [weatherTemp, setWeatherTemp] = useState(null);
+  const [moscowTime, setMoscowTime] = useState(null);
   const [isDataLoading, setIsDataLoading] = useState(true);
-  const [hasError, setHasError] = useState('');
   const [taskList, setTaskList] = useState([]);
 
+  // Смещение локального времени относительно московского (в миллисекундах)
+  const timeOffsetRef = useRef(0);
+
+  // Первоначальная загрузка данных из API
   useEffect(() => {
     const loadExternalData = async () => {
+      // --- Курсы валют ---
       try {
-        const currencyRequest = await axios.get('https://www.cbr-xml-daily.ru/daily_json.js');
-        
-        if (!currencyRequest.data?.Valute) {
-          throw new Error('Не удалось получить курсы валют');
+        const currencyRes = await axios.get('https://www.cbr-xml-daily.ru/daily_json.js');
+        if (currencyRes.data?.Valute) {
+          const dollar = currencyRes.data.Valute.USD.Value.toFixed(2).replace('.', ',');
+          const euro = currencyRes.data.Valute.EUR.Value.toFixed(2).replace('.', ',');
+          setCurrencyData({ dollar, euro });
         }
-
-        const dollarRate = currencyRequest.data.Valute.USD.Value.toFixed(2).replace('.', ',');
-        const euroRate = currencyRequest.data.Valute.EUR.Value.toFixed(2).replace('.', ',');
-
-        setCurrencyData({ dollar: dollarRate, euro: euroRate });
-
-        navigator.geolocation.getCurrentPosition(async (position) => {
-          const userLat = position.coords.latitude;
-          const userLon = position.coords.longitude;
-
-          const weatherRequest = await axios.get(
-            `https://api.openweathermap.org/data/2.5/weather?lat=${userLat}&lon=${userLon}&appid=${WEATHER_API_KEY}`
-          );
-
-          if (!weatherRequest.data.main) {
-            throw new Error('Данные о погоде отсутствуют');
-          }
-
-          setWeatherInfo(weatherRequest.data);
-        });
       } catch (err) {
-        console.error(err);
-        setHasError('Не удалось загрузить данные');
-      } finally {
-        setIsDataLoading(false);
+        console.warn('Не удалось загрузить курсы валют:', err.message);
       }
+
+      // --- Погода в Краснодаре (Open-Meteo) ---
+      try {
+        const weatherRes = await axios.get(
+          'https://api.open-meteo.com/v1/forecast?latitude=45.04&longitude=38.98&current_weather=true'
+        );
+        if (weatherRes.data?.current_weather?.temperature !== undefined) {
+          setWeatherTemp(weatherRes.data.current_weather.temperature);
+        }
+      } catch (err) {
+        console.warn('Не удалось загрузить погоду:', err.message);
+      }
+
+      // --- Московское время ---
+      try {
+        const timeRes = await axios.get('https://worldtimeapi.org/api/timezone/Europe/Moscow');
+        if (timeRes.data?.datetime) {
+          const mskDate = new Date(timeRes.data.datetime);
+          // Вычисляем смещение: разница между московским временем и текущим локальным
+          timeOffsetRef.current = mskDate.getTime() - Date.now();
+
+          // Показываем время сразу
+          const now = new Date(Date.now() + timeOffsetRef.current);
+          const hours = String(now.getHours()).padStart(2, '0');
+          const minutes = String(now.getMinutes()).padStart(2, '0');
+          const seconds = String(now.getSeconds()).padStart(2, '0');
+          setMoscowTime(`${hours}:${minutes}:${seconds}`);
+        }
+      } catch (err) {
+        console.warn('Не удалось загрузить время через API, использую локальное:', err.message);
+        timeOffsetRef.current = 0;
+        // Показываем локальное время
+        const now = new Date();
+        const hours = String(now.getHours()).padStart(2, '0');
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        const seconds = String(now.getSeconds()).padStart(2, '0');
+        setMoscowTime(`${hours}:${minutes}:${seconds}`);
+      }
+
+      // Загрузка завершена
+      setIsDataLoading(false);
     };
 
     loadExternalData();
   }, []);
 
+  // Запуск интервала для обновления времени каждую секунду
+  useEffect(() => {
+    if (isDataLoading) return; // ждём окончания загрузки
+
+    const updateTime = () => {
+      const now = new Date(Date.now() + timeOffsetRef.current);
+      const hours = String(now.getHours()).padStart(2, '0');
+      const minutes = String(now.getMinutes()).padStart(2, '0');
+      const seconds = String(now.getSeconds()).padStart(2, '0');
+      setMoscowTime(`${hours}:${minutes}:${seconds}`);
+    };
+
+    // Сразу обновляем время при старте интервала (на случай, если при загрузке оно ещё не установилось)
+    updateTime();
+    const intervalId = setInterval(updateTime, 1000);
+
+    return () => clearInterval(intervalId);
+  }, [isDataLoading]);
+
+  // Восстановление задач из localStorage
   useEffect(() => {
     const savedTasks = localStorage.getItem(STORAGE_KEY);
     if (savedTasks) {
@@ -67,6 +110,7 @@ function App() {
     }
   }, []);
 
+  // Сохранение задач в localStorage
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(taskList));
@@ -98,20 +142,27 @@ function App() {
     );
   };
 
-  if (isDataLoading) return <div className="App"><p>Загрузка данных...</p></div>;
-  if (hasError) return <div className="App"><p style={{ color: 'red' }}>{hasError}</p></div>;
+  if (isDataLoading) {
+    return <div className="App"><p>Загрузка данных...</p></div>;
+  }
 
   return (
     <div className="App">
       <div className="info-panel">
-        <div className="currency-block">
-          <div className="currency-item">Доллар США — {currencyData.dollar} ₽</div>
-          <div className="currency-item">Евро — {currencyData.euro} ₽</div>
-        </div>
-        
-        {weatherInfo && (
-          <div className="weather-block">
-            🌡️ {(weatherInfo.main.temp - 273.15).toFixed(1)}°C
+        {moscowTime && (
+          <div className="info-block">
+            🕐 Московское время: {moscowTime}
+          </div>
+        )}
+        {currencyData && (
+          <div className="info-block">
+            <div>Доллар США — {currencyData.dollar} ₽</div>
+            <div>Евро — {currencyData.euro} ₽</div>
+          </div>
+        )}
+        {weatherTemp !== null && (
+          <div className="info-block">
+            🌡️ Краснодар: {weatherTemp}°C
           </div>
         )}
       </div>
